@@ -1,0 +1,10 @@
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+*.h5
+*.npy
+*.png
+*.svg
+encoder_lapinn_soft_2grade/
+mlp_ff_lapinn_soft_2grade/
+mlp_ff_lapinn_soft_2grade_boundszoom2/
