@@ -27,6 +27,12 @@ def apply_mask(grid, mask):
     out[mask] = np.nan
     return out
 
+def contact_distance_weights(pts, contact_centers, sigma=0.1):
+    diffs = pts[:, None, :] - contact_centers[None, :, :]   # (N, K, 3)
+    dists = np.linalg.norm(diffs, axis=-1)                   # (N, K)
+    min_dist = dists.min(axis=1)                             # (N,) nearest contact
+    return np.exp(-(min_dist**2) / (2 * sigma**2))
+    
 # ----------------------------------------------------------------
 # 2. MAIN COMPARISON & PLOTTING ENGINE
 # ----------------------------------------------------------------
@@ -167,13 +173,21 @@ def compare_with_fem(solver, n_grid=400, x_bounds=(-1, 1), y_bounds=(-1, 1), z_b
     _, _, cnd_y = grid_raw(cs_y, remap_fn(cond_y), 0, 2, _mask_xz)
     _, _, cnd_x = grid_raw(cs_x, remap_fn(cond_x), 1, 2, _mask_yz)
 
-    # --- Error Metrics ---
-    interp_fem = griddata(fem_pts, fem_pot, X_f_np[:, :3], method='linear')
+    in_bounds = (
+        (X_f_np[:, 0] >= x_bounds[0]) & (X_f_np[:, 0] <= x_bounds[1]) &
+        (X_f_np[:, 1] >= y_bounds[0]) & (X_f_np[:, 1] <= y_bounds[1]) &
+        (X_f_np[:, 2] >= z_bounds[0]) & (X_f_np[:, 2] <= z_bounds[1])
+    )
+    X_f_np = X_f_np[in_bounds]
 
-    abs_error = np.abs(interp_fem - solver.predict(X_f_np[:, :3]))
+    # --- Error Metrics ---
+    interp_fem = griddata(fem_pts, fem_pot, X_f_np[:, :3], method='linear').flatten()
+    abs_error = np.abs(interp_fem - solver.predict(X_f_np[:, :3]).numpy().flatten())
     mae, rmse, max_ae = np.mean(abs_error), np.sqrt(np.mean(abs_error**2)), np.max(abs_error)
     nonzero_mask = np.abs(interp_fem) > 1e-10
-    rel_error = np.zeros_like(interp_fem)
+    #rel_error = np.zeros_like(interp_fem)
+    #rel_error[nonzero_mask] = abs_error[nonzero_mask] / np.abs(interp_fem[nonzero_mask])
+    rel_error = np.zeros(len(interp_fem))
     rel_error[nonzero_mask] = abs_error[nonzero_mask] / np.abs(interp_fem[nonzero_mask])
 
     '''
@@ -188,7 +202,20 @@ def compare_with_fem(solver, n_grid=400, x_bounds=(-1, 1), y_bounds=(-1, 1), z_b
     rel_error[nonzero_mask] = abs_error[nonzero_mask] / np.abs(fem_pot[nonzero_mask])
     X_f_np = fem_pts
     '''
+    # --- Weighted Error Metrics ---
+    contact_centers = np.array([
+        solver.pde_params['contact1_cylinder_center'],
+        solver.pde_params['contact2_cylinder_center'],
+    ])
+    weights_raw = contact_distance_weights(X_f_np[:, :3], contact_centers, sigma=0.1)
+    weights = weights_raw / weights_raw.sum()
 
+    wmae = np.sum(weights * abs_error)
+    wrel_error = np.zeros_like(interp_fem)
+    wrel_error[nonzero_mask] = abs_error[nonzero_mask] / np.abs(interp_fem[nonzero_mask])
+    wmre = np.sum(weights * wrel_error) * 100
+
+    
     def grid_err(cs_indices, col_a, col_b, mask_fn, error_array=abs_error):
         pts, err = X_f_np[cs_indices], error_array[cs_indices]
         a_bounds, b_bounds = get_plane_bounds(col_a, col_b)
@@ -205,6 +232,10 @@ def compare_with_fem(solver, n_grid=400, x_bounds=(-1, 1), y_bounds=(-1, 1), z_b
     _, _, rel_err_z = grid_err(np.isclose(X_f_np[:, 2], z_slice, atol=tolerance), 0, 1, _mask_xy, rel_error)
     _, _, rel_err_y = grid_err(np.isclose(X_f_np[:, 1], y_slice, atol=tolerance), 0, 2, _mask_xz, rel_error)
     _, _, rel_err_x = grid_err(np.isclose(X_f_np[:, 0], x_slice, atol=tolerance), 1, 2, _mask_yz, rel_error)
+
+    _, _, w_z = grid_err(np.isclose(X_f_np[:, 2], z_slice, atol=tolerance), 0, 1, _mask_xy, weights_raw)
+    _, _, w_y = grid_err(np.isclose(X_f_np[:, 1], y_slice, atol=tolerance), 0, 2, _mask_xz, weights_raw)
+    _, _, w_x = grid_err(np.isclose(X_f_np[:, 0], x_slice, atol=tolerance), 1, 2, _mask_yz, weights_raw)
 
     # ----------------------------------------------------------------
     # 3. PLOT CONSTRUCTION
@@ -354,4 +385,44 @@ def compare_with_fem(solver, n_grid=400, x_bounds=(-1, 1), y_bounds=(-1, 1), z_b
     if save_dir is not None:
         fname = os.path.join(save_dir, fname)
     plt.savefig(fname, dpi=150, bbox_inches='tight')
+    plt.show()
+
+    print("=" * 55)
+    print(f"{'ACCURACY METRICS':^55}")
+    print("=" * 55)
+    print(f"  MAE:      {mae:.6f} V")
+    print(f"  RMSE:     {rmse:.6f} V")
+    print(f"  MaxAE:    {max_ae:.6f} V")
+    print(f"  MRE:      {mre:.4f} %")
+    print(f"  Max RE:   {max_re:.4f} %")
+    print("-" * 55)
+    print(f"  wMAE:     {wmae:.6f} V  (contact-weighted)")
+    print(f"  wMRE:     {wmre:.4f} %  (contact-weighted)")
+    print("=" * 55)
+
+    fig_w, axes_w = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+
+    for ax, grid, extent, title, xlabel, ylabel in [
+        (axes_w[0], w_z, [x_bounds[0], x_bounds[1], y_bounds[0], y_bounds[1]],
+         f'xy-plane (z={z_slice*20:.0f}mm)', 'x', 'y'),
+        (axes_w[1], w_y, [x_bounds[0], x_bounds[1], z_bounds[0], z_bounds[1]],
+         f'xz-plane (y={y_slice*20:.0f}mm)', 'x', 'z'),
+        (axes_w[2], w_x, [y_bounds[0], y_bounds[1], z_bounds[0], z_bounds[1]],
+         f'yz-plane (x={x_slice*20:.0f}mm)', 'y', 'z'),
+    ]:
+        im = ax.imshow(grid, extent=extent, origin='lower', cmap='viridis', vmin=0, vmax=1, aspect='equal')
+        ax.set_title(f'Weight map — {title}', fontsize=14)
+        ax.set_xlabel(f'{xlabel} / mm', fontsize=12)
+        ax.set_ylabel(f'{ylabel} / mm', fontsize=12)
+        scale_mm = 20
+        x_ticks = np.linspace(extent[0], extent[1], 5)
+        y_ticks = np.linspace(extent[2], extent[3], 5)
+        ax.set_xticks(x_ticks); ax.set_xticklabels([f'{int(t*scale_mm)}' for t in x_ticks])
+        ax.set_yticks(y_ticks); ax.set_yticklabels([f'{int(t*scale_mm)}' for t in y_ticks])
+        fig_w.colorbar(im, ax=ax, shrink=0.7, label='Weight')
+
+    fname_w = f"weight_map{suffix}.svg"
+    if save_dir is not None:
+        fname_w = os.path.join(save_dir, fname_w)
+    fig_w.savefig(fname_w, dpi=150, bbox_inches='tight')
     plt.show()

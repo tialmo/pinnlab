@@ -76,7 +76,7 @@ MODEL = {
     #   True  — coordinates first embedded as γ(x) = [cos(2πBx), sin(2πBx)]
     #           via a fixed random B ~ N(0, fourier_sigma²).
     #           Addresses spectral bias for high-frequency solutions.
-    'use_fourier': False,
+    'use_fourier': True,
     'fourier_features': 128,   # embedding output dim = 2 * this
     'fourier_sigma': 2.0,      # larger → higher-frequency features in B
 }
@@ -85,8 +85,8 @@ MODEL = {
 # Training
 # ---------------------------------------------------------------------------
 TRAINING = {
-    'epochs': 50000,
-    'evaluate_interval': 5000,
+    'epochs': 10001,
+    'evaluate_interval': 500,
     'display_interval': 200,    # print loss every N epochs
     'accuracy_interval': 500,   # compute FEM comparison error every N epochs
 
@@ -95,28 +95,40 @@ TRAINING = {
     #                training). LAN architecture mirrors MODEL width/hidden_layers.
     #   'adaptive' — learnable scalar weight per loss term, gradient-based update.
     #   'classic'  — fixed scalar weights defined in classic_weights below.
-    'loss_weighting': 'lapinn', # or 'adaptive' or 'classic'
+    'loss_weighting': 'lapinn', # or 'adaptive' or 'classic' or 'lapinn'
     'classic_weights': {
-        'w_r':    1.0,
-        'w_n':    1.0,
+        'w_r':    1e-3,
+        'w_n':    1e-1,
         'w_b_c1': 1.0,
         'w_b_c2': 1.0,
-        'w_if':   1.0,
+        'w_if':   1e5,
         'w_d':    1.0,
     },
 
     # Collocation point counts per epoch (randomly resampled each epoch)
-    'n_collocation': 10000,
+    'n_collocation': 10000, #value probably ignored by code for now, since collocation points are loaded from MRI
     'n_b_cube':      2400,
     'n_b_contact1':  600,
     'n_b_contact2':  600,
-    'n_b_neumann':   600,
+    'n_b_neumann':   1000,
     'n_interface':   5000,
 
     # FEM reference data (used for optional validation / data loss term)
     'fem_data_path':   'remapped_binary_potential.vtu',
     'sigma_data_path': 'remapped_scaled_data.npz',
     'fem_n_sample':    10000,
+
+    # Near-contact collocation enrichment
+    # Set to 0 or None to disable
+    'n_near_contact': 10,   # points sampled per contact
+    'near_contact_spread': 4.0,  # sampling radius as multiple of contact radius
+
+    # Collocation SUBsampling in loss (per epoch)
+    # Set to None to use all points every step
+    'n_collocation_sample': 10000,
+    
+    'n_random_collocation': 10,  # random uniform interior points, set 0 to disable
+
 }
 
 

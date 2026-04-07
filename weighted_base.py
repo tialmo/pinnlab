@@ -1,6 +1,9 @@
 import tensorflow as tf
 from lapinn_base import LAPINN
-
+import os
+import shutil
+import numpy as np
+import evaluate
 
 class WeightedPINN(LAPINN):
 
@@ -15,8 +18,24 @@ class WeightedPINN(LAPINN):
         }
 
     def compute_loss(self):
+        '''
         r_indices   = tf.random.shuffle(tf.range(tf.shape(self.x_r)[0]))[:10000]
         x_r_sampled = tf.gather(self.x_r, r_indices)
+
+        d_indices   = tf.random.shuffle(tf.range(tf.shape(self.x_d)[0]))[:10000]
+        x_d_sampled = tf.gather(self.x_d, d_indices)
+        u_d_sampled = tf.gather(self.u_d, d_indices)
+        '''
+        n_sample = self.n_collocation_sample
+        if n_sample is not None:
+            r_indices = tf.random.shuffle(tf.range(tf.shape(self.x_r)[0]))[:n_sample]
+        else:
+            r_indices = tf.range(tf.shape(self.x_r)[0])
+
+        x_r_sampled = tf.concat([
+            tf.gather(self.x_r, r_indices),
+            self.x_r_near,
+        ], axis=0)
 
         d_indices   = tf.random.shuffle(tf.range(tf.shape(self.x_d)[0]))[:10000]
         x_d_sampled = tf.gather(self.x_d, d_indices)
@@ -88,3 +107,59 @@ class WeightedPINN(LAPINN):
 
         del tape
         return total_loss, loss_r, loss_n, loss_b_c1, loss_b_c2, loss_d, loss_if
+
+    def save(self, save_dir, epoch=None):
+        os.makedirs(save_dir, exist_ok=True)
+        shutil.copy('config.py', os.path.join(save_dir, 'config.py'))
+        suffix = f"_epoch{epoch}" if epoch is not None else ""
+        self.main_net.save_weights(os.path.join(save_dir, f'main_net{suffix}.weights.h5'))
+        if self.fourier_B is not None:
+            np.save(os.path.join(save_dir, f'fourier_B{suffix}.npy'), self.fourier_B)
+        print(f"Epoch {epoch}: main_net weights saved to '{save_dir}'")
+    
+    def train(self, epochs, display_interval=100, accuracy_interval=500, evaluate_interval=0, save_dir=None):
+        history = {
+            'total_loss': [], 'loss_r': [], 'loss_n': [],
+            'loss_b_c1': [], 'loss_b_c2': [], 'loss_d': [],
+            'loss_if': [], 'raw_mse': [], 'accuracy_epochs': []
+        }
+    
+        for epoch in range(epochs):
+            total_loss, loss_r, loss_n, loss_b_c1, loss_b_c2, loss_d, loss_if = self.train_step()
+    
+            history['total_loss'].append(total_loss.numpy())
+            history['loss_r'].append(loss_r.numpy())
+            history['loss_n'].append(loss_n.numpy())
+            history['loss_b_c1'].append(loss_b_c1.numpy())
+            history['loss_b_c2'].append(loss_b_c2.numpy())
+            history['loss_d'].append(loss_d.numpy())
+            history['loss_if'].append(loss_if.numpy())
+    
+            if epoch % display_interval == 0:
+                print(f"Epoch {epoch}: Loss = {total_loss.numpy():.6f}, "
+                      f"Loss_r = {loss_r.numpy():.6f}, "
+                      f"Loss_n = {loss_n.numpy():.6f}, "
+                      f"Loss_b_c1 = {loss_b_c1.numpy():.6f}, "
+                      f"Loss_b_c2 = {loss_b_c2.numpy():.6f}, "
+                      f"Loss_d = {loss_d.numpy():.6f}, "
+                      f"Loss_if = {loss_if.numpy():.6f}")
+    
+            if epoch % accuracy_interval == 0 and hasattr(self, 'compute_prediction_accuracy'):
+                mse = self.compute_prediction_accuracy()
+                history['raw_mse'].append(mse)
+                history['accuracy_epochs'].append(epoch)
+                print(f"Epoch {epoch}: Raw Prediction MSE = {mse:.6f}")
+    
+            if evaluate_interval > 0 and epoch % evaluate_interval == 0 and epoch > 0:
+                print(f"Epoch {epoch}: running evaluation...")
+                self.save(save_dir, epoch=epoch)
+                evaluate.compare_with_fem(
+                    self,
+                    x_bounds=(-0.5, 0.5),
+                    y_bounds=(-0.5, 0.5),
+                    z_bounds=(-0.5, 0.5),
+                    epoch=epoch,
+                    save_dir=save_dir,
+                )
+    
+        return history

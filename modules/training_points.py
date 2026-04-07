@@ -6,7 +6,8 @@ from modules.geometry import is_inside_cylinder, build_interface_pairs
 def generate_training_points(pde_params, domain_bounds,
                               n_r=10000, n_b_cube=600,
                               n_b_contact1=400, n_b_contact2=400,
-                              n_b_neumann=400):
+                              n_b_neumann=400, n_near_contact=0,
+                              near_contact_spread=4.0, n_random_collocation=0):
     """
     Load collocation points from the pre-built NPZ file, filter out cylinder
     interiors, generate all boundary point sets, and return everything as a dict.
@@ -66,8 +67,11 @@ def generate_training_points(pde_params, domain_bounds,
             with_flat_bottom=False)
 
         if not (in_contact1 or in_contact2 or in_neumann):
-            valid_points.append(X_f_coordinates[i])
-            valid_sigmas.append(sigma_values[i])
+            if (x_min <= x <= x_max and
+                y_min <= y <= y_max and
+                z_min <= z <= z_max):
+                valid_points.append(X_f_coordinates[i])
+                valid_sigmas.append(sigma_values[i])
 
     x_r_all = np.array(valid_points)
     sigma_r_all = np.array(valid_sigmas)
@@ -175,8 +179,8 @@ def generate_training_points(pde_params, domain_bounds,
         if n_cylinder > 0:
             theta = tf.random.uniform((n_cylinder, 1), 0, 2 * np.pi)
             z_n = tf.random.uniform((n_cylinder, 1),
-                                     neumann_cz - neumann_hh,
-                                     neumann_cz + neumann_hh)
+                                     max(neumann_cz - neumann_hh, z_min),
+                                     min(neumann_cz + neumann_hh, z_max))
             neumann_pts.append(tf.concat([
                 neumann_cx + neumann_r * tf.cos(theta),
                 neumann_cy + neumann_r * tf.sin(theta),
@@ -193,6 +197,7 @@ def generate_training_points(pde_params, domain_bounds,
             ], axis=1))
 
     x_b_neumann_all = tf.concat([x_b_cube] + neumann_pts, axis=0)
+    #x_b_neumann_all = tf.concat(neumann_pts, axis=0)
 
     # -------------------------------------------------------------------------
     # Boundary condition values
@@ -214,8 +219,83 @@ def generate_training_points(pde_params, domain_bounds,
     print(f"Generated {n_c1} contact 1 Dirichlet boundary points")
     print(f"Generated {n_c2} contact 2 Dirichlet boundary points")
 
+    # -------------------------------------------------------------------------
+    # Enrich collocation points near contacts (optional)
+    # -------------------------------------------------------------------------
+    if n_near_contact and n_near_contact > 0:
+        def sample_near_contact(center, radius, height):
+            cx, cy, cz = center
+            pts = []
+            while len(pts) < n_near_contact:
+                batch = np.column_stack([
+                    np.random.uniform(cx - near_contact_spread*radius, cx + near_contact_spread*radius, n_near_contact),
+                    np.random.uniform(cy - near_contact_spread*radius, cy + near_contact_spread*radius, n_near_contact),
+                    np.random.uniform(cz - height*near_contact_spread, cz + height*near_contact_spread, n_near_contact),
+                ])
+                r_xy = np.sqrt((batch[:,0]-cx)**2 + (batch[:,1]-cy)**2)
+                in_cyl = (r_xy < radius) & (np.abs(batch[:,2] - cz) < height/2)
+                r_xy_n = np.sqrt((batch[:,0]-neumann_cx)**2 + (batch[:,1]-neumann_cy)**2)
+                in_shaft = r_xy_n < neumann_r
+                valid = ~in_cyl & ~in_shaft
+                pts.extend(batch[valid].tolist())
+            return np.array(pts[:n_near_contact])
+
+        near_c1 = sample_near_contact(
+            pde_params['contact1_cylinder_center'],
+            pde_params['contact1_cylinder_radius'],
+            pde_params['contact1_cylinder_height'],
+        )
+        near_c2 = sample_near_contact(
+            pde_params['contact2_cylinder_center'],
+            pde_params['contact2_cylinder_radius'],
+            pde_params['contact2_cylinder_height'],
+        )
+        x_r_near = tf.constant(np.concatenate([near_c1, near_c2], axis=0), dtype=tf.float32)
+        print(f"Generated {len(x_r_near)} near-contact enrichment points")
+    else:
+        x_r_near = tf.zeros((0, 3), dtype=tf.float32)
+        print("Near-contact enrichment disabled")
+
+
+    # -------------------------------------------------------------------------
+    # Random uniform interior collocation points
+    # -------------------------------------------------------------------------
+    if n_random_collocation and n_random_collocation > 0:
+        pts = np.column_stack([
+            np.random.uniform(x_min, x_max, n_random_collocation * 4),
+            np.random.uniform(y_min, y_max, n_random_collocation * 4),
+            np.random.uniform(z_min, z_max, n_random_collocation * 4),
+        ])
+        valid = np.array([
+            not (is_inside_cylinder(x, y, z,
+                    radius=pde_params['contact1_cylinder_radius'],
+                    height=pde_params['contact1_cylinder_height'],
+                    center=pde_params['contact1_cylinder_center'],
+                    with_half_sphere=False, with_flat_bottom=False) or
+                 is_inside_cylinder(x, y, z,
+                    radius=pde_params['contact2_cylinder_radius'],
+                    height=pde_params['contact2_cylinder_height'],
+                    center=pde_params['contact2_cylinder_center'],
+                    with_half_sphere=False, with_flat_bottom=False) or
+                 is_inside_cylinder(x, y, z,
+                    radius=pde_params['neumann_cylinder_radius'],
+                    height=pde_params['neumann_cylinder_height'],
+                    center=pde_params['neumann_cylinder_center'],
+                    with_half_sphere=with_half_sphere, with_flat_bottom=False))
+            for x, y, z in pts
+        ])
+        x_r_random = tf.constant(pts[valid][:n_random_collocation], dtype=tf.float32)
+        print(f"Generated {len(x_r_random)} random interior collocation points")
+    else:
+        x_r_random = tf.zeros((0, 3), dtype=tf.float32)
+
+
+    
+
     return dict(
         x_r=x_r,
+        x_r_near=x_r_near,
+        x_r_random=x_r_random,
         x_r_all=x_r_all,
         sigma_r=sigma_r,
         sigma_r_all=sigma_r_all,

@@ -65,6 +65,9 @@ class LaplaceCylinderLAPINNSolver(_BASE):
             use_fourier=use_fourier,
             fourier_features=fourier_features,
             fourier_sigma=fourier_sigma,
+            loss_weighting=loss_weighting,
+            classic_weights=classic_weights,
+            n_collocation_sample=TRAINING.get('n_collocation_sample', 10000),
         )
 
     # ------------------------------------------------------------------
@@ -99,7 +102,8 @@ class LaplaceCylinderLAPINNSolver(_BASE):
 
     def generate_training_points(self, n_r=10000, n_b_cube=600,
                                   n_b_contact1=400, n_b_contact2=400,
-                                  n_b_neumann=400):
+                                  n_b_neumann=400, n_near_contact=0,
+                                  near_contact_spread=4.0, n_random_collocation=0):
         """
         Delegate to modules/training_points and store all results as
         instance attributes.
@@ -114,9 +118,14 @@ class LaplaceCylinderLAPINNSolver(_BASE):
             n_b_contact1=n_b_contact1,
             n_b_contact2=n_b_contact2,
             n_b_neumann=n_b_neumann,
+            n_near_contact=n_near_contact,
+            near_contact_spread=near_contact_spread,
+            n_random_collocation=n_random_collocation,
         )
 
         self.x_r       = data['x_r']
+        self.x_r_near  = data['x_r_near']
+        self.x_r_random = data['x_r_random']
         self.x_r_all   = data['x_r_all']
         self.sigma_r   = data['sigma_r']
         self.sigma_r_all = data['sigma_r_all']

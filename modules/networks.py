@@ -65,8 +65,51 @@ def _build_mlp_body(net_input, layers_main, initializer):
         )(x)
     return x
 
-
 def _build_encoder_body(net_input, layers_main, initializer):
+    """
+    Improved fully-connected architecture for PINNs.
+    Matches equations 43-47 in Wang et al. (2020).
+    """
+    # 1. Encoder projections (U and V) from raw inputs
+    # U = phi(XW^1 + b^1), V = phi(XW^2 + b^2)
+    U = tf.keras.layers.Dense(
+        layers_main[1], activation='tanh',
+        kernel_initializer=initializer,
+        bias_initializer='zeros', name='encoder_U'
+    )(net_input)
+
+    V = tf.keras.layers.Dense(
+        layers_main[1], activation='tanh',
+        kernel_initializer=initializer,
+        bias_initializer='zeros', name='encoder_V'
+    )(net_input)
+
+    # 2. First hidden layer: H^(1) = phi(XW^{z,1} + b^{z,1})
+    H = tf.keras.layers.Dense(
+        layers_main[1], activation='tanh',
+        kernel_initializer=initializer,
+        bias_initializer='zeros', name='hidden_1'
+    )(net_input)
+
+    # 3. Subsequent layers with multiplicative gating
+    # Z^(k) = phi(H^(k)W^{z,k} + b^{z,k})
+    # H^(k+1) = (1 - Z^(k)) * U + Z^(k) * V
+    for i, layer_size in enumerate(layers_main[2:-1], start=2):
+        Z = tf.keras.layers.Dense(
+            layer_size, activation='tanh',
+            kernel_initializer=initializer,
+            bias_initializer='zeros', name=f'gate_{i}'
+        )(H)
+        
+        # Element-wise multiplicative interaction
+        H = tf.keras.layers.Lambda(
+            lambda imgs: (1.0 - imgs[0]) * imgs[1] + imgs[0] * imgs[2],
+            name=f'layer_update_{i}'
+        )([Z, U, V])
+
+    return H
+
+def _build_encoder_body_old(net_input, layers_main, initializer):
     """
     Dual-encoder MLP body.
 

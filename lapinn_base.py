@@ -101,6 +101,9 @@ class LAPINN:
         self.u_b_c1 = None   # Dirichlet contact 1 values
         self.u_b_c2 = None   # Dirichlet contact 2 values
         self.u_d    = None   # FEM data values
+        self.x_r_near = tf.zeros((0, 3), dtype=tf.float32)  # overwritten by generate_training_points
+        self.n_collocation_sample = kwargs.pop('n_collocation_sample', 10000)
+        self.x_r_random = tf.zeros((0, 3), dtype=tf.float32)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -139,6 +142,17 @@ class LAPINN:
             x_n, self.main_net, self.domain_bounds, self.pde_params
         )
 
+    def _contact_pde_weights(self, pts, sigma):
+        """Gaussian weights by distance to nearest contact. Mean-normalized."""
+        contact_centers = tf.constant([
+            self.pde_params['contact1_cylinder_center'],
+            self.pde_params['contact2_cylinder_center'],
+        ], dtype=tf.float32)
+        diffs = pts[:, None, :] - contact_centers[None, :, :]  # (N, K, 3)
+        dists = tf.reduce_min(tf.norm(diffs, axis=-1), axis=1)  # (N,)
+        w = tf.exp(-(dists**2) / (2 * sigma**2))
+        return w / tf.reduce_mean(w)  # mean=1 so overall loss scale unchanged
+
     # ------------------------------------------------------------------
     # Loss computation
     # ------------------------------------------------------------------
@@ -174,11 +188,51 @@ class LAPINN:
         x_d_sampled = tf.gather(self.x_d, d_indices)
         u_d_sampled = tf.gather(self.u_d, d_indices)
 
+        # Random sub-sampling of collocation and data points
+        #r_indices = tf.random.shuffle(tf.range(tf.shape(self.x_r)[0]))[:7500]
+        #d_indices = tf.random.shuffle(tf.range(tf.shape(self.x_d)[0]))[:10000]
+        """
+        x_r_sampled = tf.concat([
+            tf.gather(self.x_r, r_indices),
+            tf.gather(self.x_d[:, :3], d_indices[:1500]),  # FEM coords only
+        ], axis=0)  # total: 10000 collocation points
+        
+        #x_d_sampled = tf.gather(self.x_d, d_indices)
+        #u_d_sampled = tf.gather(self.u_d, d_indices)
+        
+        
+        n_sample = self.n_collocation_sample
+        if n_sample is not None:
+            n_near = tf.shape(self.x_r_near)[0]
+            n_grid = tf.maximum(n_sample - n_near, 0)
+            r_indices = tf.random.shuffle(tf.range(tf.shape(self.x_r)[0]))[:n_grid]
+            x_r_sampled = tf.concat([
+                tf.gather(self.x_r, r_indices),
+                self.x_r_near,
+            ], axis=0)
+        else:
+            x_r_sampled = tf.concat([self.x_r, self.x_r_near], axis=0)
+
+        x_r_sampled = tf.concat([
+            tf.gather(self.x_r, r_indices),
+            self.x_r_near,
+            self.x_r_random,
+        ], axis=0)
+        
+        # FEM data sampling — always needed for loss_d
+        d_indices = tf.random.shuffle(tf.range(tf.shape(self.x_d)[0]))[:10000]
+        x_d_sampled = tf.gather(self.x_d, d_indices)
+        u_d_sampled = tf.gather(self.u_d, d_indices)
+        """
         with tf.GradientTape(persistent=True) as tape:
             tape.watch(self.x_n)
 
             # --- Interior PDE residual ---
             r_int = self.compute_residual(x_r_sampled)      # (Nr, 1)
+            #w = self._contact_pde_weights(x_r_sampled, sigma=0.1) ##########################################################################
+            #r_int = tf.reduce_mean(w * r_int) ################################################################ gaussian weighting should be optional
+
+            
             r_if  = tf.zeros((0, 1), dtype=tf.float32)
 
             # --- Interface flux residual (if pairs were built) ---
@@ -240,8 +294,8 @@ class LAPINN:
             loss_b_c2 = tf.reduce_mean(self.lan_b_c2(se_b_c2_reshaped))
             loss_d    = tf.reduce_mean(self.lan_d(se_d_reshaped))
 
-            # total_loss: loss_if is 0 in mode A, non-zero in mode B
-            total_loss = loss_r + loss_b_c1 + loss_b_c2 + loss_n + loss_if
+            
+            total_loss = loss_r + 1e1*loss_b_c1 + 1e1*loss_b_c2 + loss_n + loss_if
             # total_loss = loss_d  # (alternative)
 
         return (total_loss, loss_r, loss_n, loss_b_c1, loss_b_c2, loss_d, loss_if,
@@ -352,17 +406,14 @@ class LAPINN:
 
             if evaluate_interval > 0 and epoch % evaluate_interval == 0 and epoch > 0:
                 print(f"Epoch {epoch}: running evaluation...")
-                self.save(save_dir, epoch=epoch)
-                
-
-
+                epoch_dir = self.save(save_dir, epoch=epoch)
                 evaluate.compare_with_fem(
-                    self, 
+                    self,
                     x_bounds=(-0.5, 0.5),
                     y_bounds=(-0.5, 0.5),
                     z_bounds=(-0.5, 0.5),
                     epoch=epoch,
-                    save_dir=save_dir,
+                    save_dir=epoch_dir,   # <-- plots go into epoch subfolder
                 )
 
         return history
@@ -377,6 +428,27 @@ class LAPINN:
             x = tf.convert_to_tensor(x, dtype=tf.float32)
         return self.main_net(x)
 
+    def save(self, save_dir, epoch=None):
+        # create epoch subfolder
+        if epoch is not None:
+            epoch_dir = os.path.join(save_dir, f'epoch_{epoch}')
+        else:
+            epoch_dir = save_dir
+        os.makedirs(epoch_dir, exist_ok=True)
+
+        shutil.copy('config.py', os.path.join(epoch_dir, 'config.py'))
+        self.main_net.save_weights(os.path.join(epoch_dir, 'main_net.weights.h5'))
+        self.lan_r.save_weights(   os.path.join(epoch_dir, 'lan_r.weights.h5'))
+        self.lan_n.save_weights(   os.path.join(epoch_dir, 'lan_n.weights.h5'))
+        self.lan_b_c1.save_weights(os.path.join(epoch_dir, 'lan_b_c1.weights.h5'))
+        self.lan_b_c2.save_weights(os.path.join(epoch_dir, 'lan_b_c2.weights.h5'))
+        self.lan_d.save_weights(   os.path.join(epoch_dir, 'lan_d.weights.h5'))
+        self.lan_if.save_weights(  os.path.join(epoch_dir, 'lan_if.weights.h5'))
+        if self.fourier_B is not None:
+            np.save(os.path.join(epoch_dir, 'fourier_B.npy'), self.fourier_B)
+        print(f"Epoch {epoch}: all weights saved to '{epoch_dir}'")
+        return epoch_dir
+    '''
     # in lapinn_base.py
     def save(self, save_dir, epoch=None):
         os.makedirs(save_dir, exist_ok=True)
@@ -393,3 +465,4 @@ class LAPINN:
         if self.fourier_B is not None:
             np.save(os.path.join(save_dir, f'fourier_B{suffix}.npy'), self.fourier_B)
         print(f"Epoch {epoch}: all weights saved to '{save_dir}'")
+    '''
